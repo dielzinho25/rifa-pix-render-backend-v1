@@ -3,17 +3,31 @@ import cors from 'cors';
 import crypto from 'node:crypto';
 import admin from 'firebase-admin';
 
-const required=['MP_ACCESS_TOKEN','FIREBASE_DATABASE_URL','FIREBASE_PROJECT_ID','FIREBASE_CLIENT_EMAIL','FIREBASE_PRIVATE_KEY','PUBLIC_SITE_URL','PUBLIC_BACKEND_URL','MP_WEBHOOK_SECRET'];
+// Prefer a single Firebase service-account JSON environment variable.
+// Legacy separate variables remain supported for existing deployments.
+const hasJson=!!process.env.FIREBASE_SERVICE_ACCOUNT_JSON?.trim();
+const legacy=['FIREBASE_PROJECT_ID','FIREBASE_CLIENT_EMAIL','FIREBASE_PRIVATE_KEY'];
+const required=['MP_ACCESS_TOKEN','FIREBASE_DATABASE_URL','PUBLIC_SITE_URL','PUBLIC_BACKEND_URL','MP_WEBHOOK_SECRET'];
 const missing=required.filter(k=>!process.env[k]);
+if(!hasJson)missing.push(...legacy.filter(k=>!process.env[k]));
 if(missing.length)console.warn('Variáveis ausentes:',missing.join(', '));
 if(!admin.apps.length && !missing.some(k=>k.startsWith('FIREBASE_'))){
- admin.initializeApp({credential:admin.credential.cert({projectId:process.env.FIREBASE_PROJECT_ID,clientEmail:process.env.FIREBASE_CLIENT_EMAIL,privateKey:process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g,'\n')}),databaseURL:process.env.FIREBASE_DATABASE_URL});
+ try {
+  const credentials=hasJson?JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON):{
+   project_id:process.env.FIREBASE_PROJECT_ID,
+   client_email:process.env.FIREBASE_CLIENT_EMAIL,
+   private_key:process.env.FIREBASE_PRIVATE_KEY
+  };
+  const privateKey=String(credentials.private_key||'').replace(/\\n/g,'\n');
+  if(!credentials.project_id||!credentials.client_email||!privateKey.includes('BEGIN PRIVATE KEY'))throw new Error('JSON da conta de serviço incompleto');
+  admin.initializeApp({credential:admin.credential.cert({projectId:credentials.project_id,clientEmail:credentials.client_email,privateKey}),databaseURL:process.env.FIREBASE_DATABASE_URL});
+ }catch(e){console.error('Falha ao configurar Firebase:',e.message);}
 }
 const db=()=>admin.database();
 const app=express();app.disable('x-powered-by');app.use(express.json({limit:'32kb'}));
 const allowed=(process.env.PUBLIC_SITE_URL||'').split(',').map(s=>s.trim().replace(/\/$/,'')).filter(Boolean);
 app.use(cors({origin(origin,cb){if(!origin||allowed.includes(origin))return cb(null,true);return cb(new Error('Origem não autorizada'));}}));
-app.get('/',(req,res)=>res.json({online:true,service:'Rifa Pix Render',version:'1.0.0',mercadoPagoConfigured:!!process.env.MP_ACCESS_TOKEN,firebaseConfigured:admin.apps.length>0}));
+app.get('/',(req,res)=>res.json({online:true,service:'Rifa Pix Render',version:'1.2.0',mercadoPagoConfigured:!!process.env.MP_ACCESS_TOKEN,firebaseConfigured:admin.apps.length>0}));
 async function mp(path,options={}){const r=await fetch('https://api.mercadopago.com'+path,{...options,headers:{Authorization:'Bearer '+process.env.MP_ACCESS_TOKEN,'Content-Type':'application/json',...(options.headers||{})},signal:AbortSignal.timeout(18000)});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error('Mercado Pago: '+(data.message||r.status));return data;}
 async function requireUser(req,res,next){try{const m=/^Bearer (.+)$/.exec(req.headers.authorization||'');if(!m)return res.status(401).json({error:'Autenticação necessária'});req.user=await admin.auth().verifyIdToken(m[1]);next();}catch{return res.status(401).json({error:'Sessão inválida'});}}
 function cents(v){return Math.round(Number(v)*100);}
@@ -21,7 +35,7 @@ app.post('/api/pix/criar',requireUser,async(req,res)=>{try{
  const id=String(req.body?.reservaId||'');if(!/^[a-zA-Z0-9_-]{8,100}$/.test(id))return res.status(400).json({error:'Reserva inválida'});
  const ref=db().ref('rifa/reservas/'+id);const snap=await ref.get();const r=snap.val();if(!r||r.ownerUid!==req.user.uid)return res.status(404).json({error:'Reserva não encontrada'});
  if(['confirmado','cancelado'].includes(r.status))return res.status(409).json({error:'Reserva já finalizada'});
- const cfg=(await db().ref('rifa/config').get()).val()||{};
+ const cfg=(await db().ref('rifa/configPublica/rifa').get()).val()||{};
  const unit=Number(cfg.precoNumero||cfg.preco||0);
  const nums=Array.isArray(r.numeros)?r.numeros:[];
  const expected=cents(unit)*nums.length;
