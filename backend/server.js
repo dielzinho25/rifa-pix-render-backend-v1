@@ -25,9 +25,14 @@ if(!admin.apps.length && !missing.some(k=>k.startsWith('FIREBASE_'))){
 }
 const db=()=>admin.database();
 const app=express();app.disable('x-powered-by');app.use(express.json({limit:'32kb'}));
-const allowed=(process.env.PUBLIC_SITE_URL||'').split(',').map(s=>s.trim().replace(/\/$/,'')).filter(Boolean);
-app.use(cors({origin(origin,cb){if(!origin||allowed.includes(origin))return cb(null,true);return cb(new Error('Origem não autorizada'));}}));
-app.get('/',(req,res)=>res.json({online:true,service:'Rifa Pix Render',version:'1.2.0',mercadoPagoConfigured:!!process.env.MP_ACCESS_TOKEN,firebaseConfigured:admin.apps.length>0}));
+// CORS: normaliza URL completa ou origem e permite os sites oficiais da rifa.
+const allowed=new Set((process.env.PUBLIC_SITE_URL||'').split(',').map(s=>s.trim()).filter(Boolean).map(s=>{try{return new URL(s).origin;}catch{return s.replace(/\/$/,'');}}));
+allowed.add('https://dielzinho25.github.io');
+const corsOptions={origin(origin,cb){if(!origin||allowed.has(origin))return cb(null,true);console.warn('CORS bloqueado para origem:',origin);return cb(null,false);},methods:['GET','POST','OPTIONS'],allowedHeaders:['Authorization','Content-Type'],optionsSuccessStatus:204};
+app.use(cors(corsOptions));
+app.options('/api/pix/criar',cors(corsOptions));
+app.get('/api/diagnostico',(_req,res)=>res.json({online:true,version:'1.3.0',mercadoPagoConfigured:!!process.env.MP_ACCESS_TOKEN,firebaseConfigured:admin.apps.length>0,siteAutorizado:allowed.has('https://dielzinho25.github.io')}));
+app.get('/',(req,res)=>res.json({online:true,service:'Rifa Pix Render',version:'1.3.0',mercadoPagoConfigured:!!process.env.MP_ACCESS_TOKEN,firebaseConfigured:admin.apps.length>0}));
 async function mp(path,options={}){const r=await fetch('https://api.mercadopago.com'+path,{...options,headers:{Authorization:'Bearer '+process.env.MP_ACCESS_TOKEN,'Content-Type':'application/json',...(options.headers||{})},signal:AbortSignal.timeout(18000)});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error('Mercado Pago: '+(data.message||r.status));return data;}
 async function requireUser(req,res,next){try{const m=/^Bearer (.+)$/.exec(req.headers.authorization||'');if(!m)return res.status(401).json({error:'Autenticação necessária'});req.user=await admin.auth().verifyIdToken(m[1]);next();}catch{return res.status(401).json({error:'Sessão inválida'});}}
 function cents(v){return Math.round(Number(v)*100);}
